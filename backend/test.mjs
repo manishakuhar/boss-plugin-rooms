@@ -5,10 +5,17 @@ await db.exec(`create schema auth;create role anon;create role authenticated;cre
 const a='00000000-0000-0000-0000-000000000001',b='00000000-0000-0000-0000-000000000002',c='00000000-0000-0000-0000-000000000003',org='10000000-0000-0000-0000-000000000001';
 await db.query(`insert into auth.users(id,email) values($1,'a@example.test'),($2,'b@example.test'),($3,'c@example.test')`,[a,b,c]);await db.query(`insert into organisations values($1,'Test org')`,[org]);await db.query(`insert into organisation_members values($1,$2,'active'),($1,$3,'active'),($1,$4,'active')`,[org,a,b,c]);
 await db.exec(await readFile(new URL('./001_rooms.sql',import.meta.url),'utf8'));
+await db.exec(await readFile(new URL('./002_delivery.sql',import.meta.url),'utf8'));
+await db.exec(await readFile(new URL('./003_attachments.sql',import.meta.url),'utf8'));
 const actor=async id=>{await db.query(`select set_config('test.actor',$1,false)`,[id]);await db.exec('set role authenticated');};
 const call=async (operation,payload={})=>(await db.query(`select public.boss_rooms_v1($1,$2::jsonb) result`,[operation,JSON.stringify({org_id:org,...payload})])).rows[0].result;
 const denied=async fn=>{let failed=false;try{await fn()}catch{failed=true}assert(failed,'Expected request to fail');};
-await actor(a);assert.equal((await call('organizations')).length,1);assert.equal((await call('directory')).length,3);
+await actor(a);
+await denied(()=>db.query('select * from boss_room_reads'));
+await denied(()=>db.query('select * from boss_room_attachments'));
+await denied(()=>db.query("select boss_rooms_core_v1('organizations','{}')"));
+await denied(()=>db.query("select boss_rooms_delivery_v1('organizations','{}')"));
+assert.equal((await call('organizations')).length,1);assert.equal((await call('directory')).length,3);
 const room=await call('create',{kind:'room',name:'Launch',members:[b],visibility:'private'});const rid=room.id;
 await denied(()=>db.query('select * from boss_rooms'));await denied(()=>db.query('insert into boss_room_memory values($1,$2,$3,1)',[org,a,'forged']));
 await actor(c);await denied(()=>call('messages',{room_id:rid}));assert.equal((await call('list')).length,0);

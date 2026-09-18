@@ -55,7 +55,7 @@ export async function startLocalServer({ directory, port = 0 } = {}) {
   }
   // Additive migrations preserve the existing fixture and conversation history.
   await db.exec('create table if not exists public.local_rooms_migrations(name text primary key, hash text not null)');
-  for (const name of ['002_delivery.sql']) {
+  for (const name of ['002_delivery.sql','003_attachments.sql']) {
     const sql = await readFile(new URL('./'+name, import.meta.url), 'utf8');
     const hash = createHash('sha256').update(sql).digest('hex');
     const saved = (await db.query('select hash from public.local_rooms_migrations where name=$1',[name])).rows[0];
@@ -79,6 +79,15 @@ export async function startLocalServer({ directory, port = 0 } = {}) {
     queue = result.catch(()=>{});
     return result;
   };
+  const filesDirectory = resolve(directory,'attachments');
+  await mkdir(filesDirectory,{recursive:true,mode:0o700});
+  const cleanup=()=>serialize(async()=>{
+    const stale=(await db.query("update public.boss_room_attachments a set status='cancelled' where a.status<>'cancelled' and ((a.message_id is null and a.created_at < now()-interval '24 hours') or exists(select 1 from public.boss_room_messages m where m.id=a.message_id and m.deleted)) returning id")).rows;
+    const cancelled=(await db.query("select id from public.boss_room_attachments where status='cancelled'")).rows;
+    for(const {id} of [...stale,...cancelled]) {await rm(resolve(filesDirectory,id),{force:true});await rm(resolve(filesDirectory,id+'.part'),{force:true});}
+  });
+  await cleanup();
+  const cleanupTimer=setInterval(()=>{cleanup().catch(()=>{});},60000);cleanupTimer.unref();
   const server = createServer(async (req,res) => {
     res.setHeader('Content-Type','application/json');
     res.setHeader('Cache-Control','no-store');
@@ -86,9 +95,47 @@ export async function startLocalServer({ directory, port = 0 } = {}) {
     // No browser-origin access, wildcard CORS, caller-supplied identity, or arbitrary SQL.
     if (req.headers.origin || !['127.0.0.1','localhost'].includes((req.headers.host || '').split(':')[0])) return reply(403,{error:'Local native clients only'});
     if (req.method==='GET' && req.url==='/health') return reply(200,{ready:true,mode:'local-test',schemaHash});
-    if (req.method!=='POST' || req.url!=='/rpc/boss_rooms_v1') return reply(404,{error:'Not found'});
+
     const actor = actors.get((req.headers.authorization||'').replace(/^Bearer /,''));
     if (!actor) return reply(401,{error:'Invalid local test session'});
+    const fileRoute = new URL(req.url,'http://127.0.0.1');
+    if (fileRoute.pathname.startsWith('/attachments/')) {
+      const id = fileRoute.pathname.slice('/attachments/'.length);
+      if (!/^[0-9a-f-]{36}$/.test(id) || !['GET','PUT'].includes(req.method)) return reply(400,{error:'Invalid file request'});
+      const payload={id,org_id:fileRoute.searchParams.get('org'),room_id:fileRoute.searchParams.get('room')};
+      const access=()=>db.transaction(async tx=>{
+        await tx.query("select set_config('test.actor',$1,true)",[actor]);
+        await tx.exec('set local role authenticated');
+        return (await tx.query("select public.boss_rooms_v1('attachment_access',$1::jsonb) as value",[JSON.stringify(payload)])).rows[0].value;
+      });
+      try {
+        const meta=await serialize(access);
+        const path=resolve(filesDirectory,id);
+        if(req.method==='GET') {
+          if(meta.status!=='ready') return reply(409,{error:'Upload incomplete'});
+          const bytes=await readFile(path);
+          await serialize(access);
+          res.setHeader('Content-Type',meta.mime);res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Content-Disposition','attachment');
+          res.writeHead(200);res.end(bytes);return;
+        }
+        if(meta.owner_id!==actor || meta.message_id || meta.status!=='uploading') return reply(409,{error:'Upload is not editable'});
+        const chunks=[];let total=0;
+        for await(const chunk of req) {total+=chunk.length;if(total>meta.size || total>10485760)return reply(413,{error:'File too large'});chunks.push(chunk);}
+        const bytes=Buffer.concat(chunks);
+        const valid=meta.mime==='image/png'?bytes.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10])):
+          meta.mime==='image/jpeg'?bytes[0]===255&&bytes[1]===216&&bytes[2]===255:
+          meta.mime==='application/pdf'?bytes.subarray(0,5).toString()==='%PDF-':!bytes.includes(0);
+        if(total!==Number(meta.size)||!valid)return reply(400,{error:'File type or size mismatch'});
+        await serialize(async()=>{
+          const fresh=await access();
+          if(fresh.status!=='uploading'||fresh.message_id||fresh.owner_id!==actor)throw new Error('Upload changed');
+          await writeFile(path+'.part',bytes,{mode:0o600});await rename(path+'.part',path);
+          await db.query("update public.boss_room_attachments set status='ready' where id=$1",[id]);
+        });
+        return reply(200,{ok:true});
+      }catch {return reply(403,{error:'File unavailable or access changed'});}
+    }
+    if (req.method!=='POST' || req.url!=='/rpc/boss_rooms_v1') return reply(404,{error:'Not found'});
     if (!(req.headers['content-type']||'').startsWith('application/json')) return reply(415,{error:'JSON required'});
     try {
       let body='';let bytes=0;
@@ -112,7 +159,7 @@ export async function startLocalServer({ directory, port = 0 } = {}) {
   const connectionFile=resolve(directory,'connection.json');
   const connection={mode:'local-test',url,schemaHash,organization:demoOrg,users};
   const temporary=connectionFile+'.tmp';await writeFile(temporary,JSON.stringify(connection,null,2),{mode:0o600});await rename(temporary,connectionFile);
-  return {url,users,connectionFile,close:async()=>{await new Promise(resolve=>server.close(resolve));await queue;await db.close();await rm(connectionFile,{force:true});await rm(lock,{recursive:true,force:true});}};
+  return {url,users,connectionFile,close:async()=>{clearInterval(cleanupTimer);await new Promise(resolve=>server.close(resolve));await queue;await db.close();await rm(connectionFile,{force:true});await rm(lock,{recursive:true,force:true});}};
   } catch(error) { await db?.close().catch(()=>{});await rm(lock,{recursive:true,force:true});throw error; }
 }
 

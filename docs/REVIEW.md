@@ -22,7 +22,7 @@ python3 scripts/verify-artifact.py
 
 On Linux, run the Gradle command under `xvfb-run -a`. CI runs both Linux and macOS. Tests use synthetic data and need neither provider credentials nor production database access. The HTTP tests create and remove their own temporary database; they do not reset an existing demo database.
 
-Local validation before submission: 35 Kotlin tests, SQL permission tests, two-client HTTP/restart tests, and real configured-provider checks inside the custom BOSS trial. Live checks exercised approved reading, exact approved sending, declined sending, and reply persistence. Live actions used only fictional accounts and local rooms. Connected external plugins were not invoked.
+Local validation before submission: 37 Kotlin tests, SQL permission tests, two-client HTTP/restart tests, and real configured-provider checks inside the custom BOSS trial. Live checks exercised approved reading, exact approved sending, declined sending, and reply persistence. Live actions used only fictional accounts and local rooms. Connected external plugins were not invoked.
 
 ## Review-sensitive behavior
 
@@ -46,3 +46,5 @@ These are draft review gates. No production deployment or store release is inclu
 ## Maintainer handoff
 
 [Maintainer requirements](MAINTAINER-REQUIREMENTS.md) records requested platform decisions/access separately from verification work owned by this contribution.
+
+Follow-up review: migrations 002 and 003 are also proposals. Messaging and attachment scope, native smoke evidence, and required production broker/event support are documented in MESSAGING-DELIVERY.md and ATTACHMENTS.md. Production storage and closed-app notifications remain maintainer integration gates.

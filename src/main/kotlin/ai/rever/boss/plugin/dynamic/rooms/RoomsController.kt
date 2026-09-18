@@ -7,8 +7,9 @@ import kotlinx.serialization.json.*
 import java.util.UUID
 
 data class Approval(val action: ProposedAction, val answer: CompletableDeferred<Boolean>)
-data class PendingMessage(val org: String, val room: Room, val parent: String?, val body: String, val requestId: String = UUID.randomUUID().toString(), val assistant: Boolean = false, val askAgent: Boolean = false, val mentions: List<String> = emptyList())
+data class PendingMessage(val org: String, val room: Room, val parent: String?, val body: String, val requestId: String = UUID.randomUUID().toString(), val assistant: Boolean = false, val askAgent: Boolean = false, val mentions: List<String> = emptyList(), val attachments: List<String> = emptyList())
 data class RoomsState(
+    val attachments: List<Attachment> = emptyList(), val uploads: List<UploadDraft> = emptyList(),
     val inbox: List<InboxEntry> = emptyList(), val delivery: String? = null,
     val organizations: List<Organization> = emptyList(), val org: String? = null,
     val conversationVisit: Long = 0,
@@ -29,6 +30,56 @@ class RoomsController(val context: PluginContext, val scope: CoroutineScope) {
     private val navigation = mutableMapOf<String, String>()
     private suspend fun remembered(key: String): String? = navigation[key] ?: navigationStorage?.getString(key, "")?.takeIf { it.isNotBlank() }
     private suspend fun remember(key: String, value: String) { navigation[key] = value; navigationStorage?.putString(key, value) }
+    val attachmentProvider: RoomsAttachmentProvider? get() = context.getPluginAPI(RoomsAttachmentProvider::class.java)
+    private val uploadJobs = mutableMapOf<String, Job>()
+    fun attach(path: String) {
+        val snapshot = state.value; val room = snapshot.room ?: return; val org = snapshot.org ?: return; val epoch = generation
+        launch {
+            check(attachmentProvider != null) { "Attachments need an authenticated storage adapter from your BOSS administrator." }
+            check(snapshot.uploads.size < 5) { "Attach up to five files." }
+            val file = java.nio.file.Path.of(path)
+            val size = withContext(Dispatchers.IO) { java.nio.file.Files.size(file) }
+            current(epoch)
+            check(state.value.uploads.size < 5) { "Attach up to five files." }
+            check(size in 1..10485760) { "Choose a non-empty file up to 10 MB." }
+            val name = file.fileName.toString()
+            val attachment = Attachment(UUID.randomUUID().toString(), room.id, snapshot.user!!, name = name, size = size, mime = attachmentMime(name))
+            update { it.copy(uploads = it.uploads + UploadDraft(attachment, path, snapshot.parent?.id)) }
+            upload(attachment.id, org)
+        }
+    }
+    fun upload(id: String, org: String? = state.value.org) {
+        val draft = state.value.uploads.firstOrNull { it.attachment.id == id } ?: return
+        if (org == null) return
+        uploadJobs[id]?.cancel()
+        val epoch = generation
+        uploadJobs[id] = scope.launch {
+            fun changed(block: (UploadDraft) -> UploadDraft) { if (epoch == generation) update { it.copy(uploads = it.uploads.map { d -> if (d.attachment.id == id) block(d) else d }) } }
+            try {
+                changed { it.copy(error = null) }
+                val a = draft.attachment
+                val result = json.decodeFromJsonElement<Attachment>(repository.raw("attachment_begin", org, "room_id" to s(a.room_id), "id" to s(a.id), "name" to s(a.name), "size" to JsonPrimitive(a.size), "mime" to s(a.mime)))
+                current(epoch)
+                if (result.status != "ready") {
+                    val bytes = withContext(Dispatchers.IO) { java.nio.file.Files.newInputStream(java.nio.file.Path.of(draft.path)).use { it.readNBytes(10485761) } }
+                    check(bytes.size.toLong() == a.size) { "The file changed. Remove it and attach it again." }
+                    checkNotNull(attachmentProvider).upload(org, a.room_id, a.id, bytes) { progress -> changed { it.copy(progress = progress) } }
+                }
+                current(epoch); changed { it.copy(ready = true, progress = 100) }
+            } catch (e: CancellationException) { throw e } catch (e: Exception) { changed { it.copy(error = "Upload failed. Retry or remove this file.") } }
+        }
+    }
+    fun removeUpload(id: String) {
+        uploadJobs.remove(id)?.cancel()
+        val snapshot = state.value; val draft = snapshot.uploads.firstOrNull { it.attachment.id == id } ?: return
+        update { it.copy(uploads = it.uploads.filterNot { d -> d.attachment.id == id }) }
+        launch { repository.raw("attachment_cancel", snapshot.org!!, "room_id" to s(draft.attachment.room_id), "id" to s(id)) }
+    }
+    suspend fun download(a: Attachment): ByteArray {
+        val snapshot = state.value; val epoch = generation
+        val bytes = checkNotNull(attachmentProvider) { "Attachment storage is not configured." }.download(snapshot.org!!, a.room_id, a.id)
+        current(epoch); check(bytes.size.toLong() == a.size) { "Incomplete download. Try again." }; return bytes
+    }
     private val announced = mutableSetOf<String>()
     private val toastIds = mutableListOf<String>()
     private val readPositions = mutableMapOf<String, Long>()
@@ -40,7 +91,10 @@ class RoomsController(val context: PluginContext, val scope: CoroutineScope) {
         update { it.copy(inbox = inbox) }
         for (entry in inbox) for (message in entry.events) {
             if (viewingLatest && snapshot.room?.id == message.room_id && snapshot.parent?.id == message.parent_id) continue
-            if (!announced.add(message.id)) continue
+            val alertKey = "alert.${snapshot.user}.$org.${message.room_id}"
+            val lastAlert = remembered(alertKey)?.toLongOrNull() ?: 0
+            current(epoch)
+            if (message.seq <= lastAlert || !announced.add(message.id)) continue
             val toast = context.notificationProvider?.showToast("New message in Rooms", NotificationType.INFO, NotificationDuration.LONG, "Rooms", "Open") {
                 if (state.value.user == snapshot.user && state.value.org == org) launch {
                     val rooms = repository.rooms(org)
@@ -51,7 +105,7 @@ class RoomsController(val context: PluginContext, val scope: CoroutineScope) {
                     else thread(repository.message(org, room.id, message.id))
                 }
             }
-            if (toast != null) toastIds.add(toast)
+            if (toast != null) { toastIds.add(toast); remember(alertKey, message.seq.toString()) }
         }
     }
     suspend fun markVisibleRead(seq: Long) {
@@ -86,7 +140,7 @@ class RoomsController(val context: PluginContext, val scope: CoroutineScope) {
     init {
         scope.launch {
             context.authDataProvider?.currentUser?.map { it?.id }?.distinctUntilChanged()?.collect { user ->
-                generation++; agentJob?.cancel(); mutable.value.approval?.answer?.complete(false); drafts.clear(); toastIds.forEach { context.notificationProvider?.dismiss(it) }; toastIds.clear(); announced.clear(); readPositions.clear(); viewingLatest = false
+                generation++; uploadJobs.values.forEach { it.cancel() }; uploadJobs.clear(); agentJob?.cancel(); mutable.value.approval?.answer?.complete(false); drafts.clear(); toastIds.forEach { context.notificationProvider?.dismiss(it) }; toastIds.clear(); announced.clear(); readPositions.clear(); viewingLatest = false
                 mutable.value = RoomsState(user = user)
                 if (user != null) loadOrganizations()
             }
@@ -129,7 +183,7 @@ class RoomsController(val context: PluginContext, val scope: CoroutineScope) {
     }
     suspend fun selectOrganization(org: String) {
         check(state.value.organizations.any { it.id == org }) { "Choose an organization you belong to." }
-        generation++; val epoch = generation; stopAgent()
+        generation++; uploadJobs.values.forEach { it.cancel() }; uploadJobs.clear(); val epoch = generation; stopAgent()
         update { RoomsState(organizations = it.organizations, org = org, user = it.user, loading = true) }
         try {
             val people = repository.directory(org); val rooms = repository.rooms(org); current(epoch)
@@ -163,9 +217,10 @@ class RoomsController(val context: PluginContext, val scope: CoroutineScope) {
         check(rooms.any { it.id == room.id && snapshot.user in it.members }) { "Conversation membership required." }
         val messages = repository.messages(org, room.id, before = if (older) snapshot.messages.minOfOrNull { it.seq } else null)
         val replies = snapshot.parent?.let { repository.messages(org, room.id, it.id) }.orEmpty()
+        val attachments = if (attachmentProvider != null) json.decodeFromJsonElement<List<Attachment>>(repository.raw("attachments", org, "room_id" to s(room.id))) else emptyList()
         current(epoch)
         if (state.value.room?.id != room.id || state.value.parent?.id != snapshot.parent?.id) return
-        update { it.copy(rooms = rooms, room = rooms.first { r -> r.id == room.id }, messages = (it.messages + messages).associateBy { m -> m.id }.values.sortedBy { m -> m.seq }, parent = it.parent?.let { p -> messages.firstOrNull { m -> m.id == p.id } ?: p }, replies = (it.replies + replies).associateBy { m -> m.id }.values.sortedBy { m -> m.seq }) }
+        update { it.copy(attachments = attachments, rooms = rooms, room = rooms.first { r -> r.id == room.id }, messages = (it.messages + messages).associateBy { m -> m.id }.values.sortedBy { m -> m.seq }, parent = it.parent?.let { p -> messages.firstOrNull { m -> m.id == p.id } ?: p }, replies = (it.replies + replies).associateBy { m -> m.id }.values.sortedBy { m -> m.seq }) }
     }
     suspend fun thread(message: Message?) {
         update { it.copy(conversationVisit = it.conversationVisit + 1, parent = message, replies = emptyList()) }
@@ -191,12 +246,14 @@ class RoomsController(val context: PluginContext, val scope: CoroutineScope) {
     fun draftKey() = state.value.parent?.id ?: state.value.room?.id.orEmpty()
     suspend fun send(body: String, mentions: List<String> = emptyList()) {
         val snapshot = state.value; val room = snapshot.room ?: return; val org = snapshot.org ?: return
-        check(body.isNotBlank() && body.length <= 16000) { "Write a message of up to 16,000 characters." }
+        check((body.isNotBlank() || snapshot.uploads.any { it.attachment.room_id == room.id && it.parent == snapshot.parent?.id }) && body.length <= 16000) { "Write a message of up to 16,000 characters." }
         check(snapshot.status == null) { "Wait for your assistant or stop its current reply first." }
         check(snapshot.pending == null && !sending) { "Retry the pending message before sending another." }
-        val ask = room.kind == "assistant" || Regex("(^|\\s)@agent\\b", RegexOption.IGNORE_CASE).containsMatchIn(body)
+        val files = snapshot.uploads.filter { it.attachment.room_id == room.id && it.parent == snapshot.parent?.id }
+        check(files.all { it.ready }) { "Wait for uploads to finish, or remove failed files." }
+        val ask = (room.kind == "assistant" && body.isNotBlank()) || Regex("(^|\\s)@agent\\b", RegexOption.IGNORE_CASE).containsMatchIn(body)
         check(!ask || agentJob?.isActive != true) { "Wait for your assistant or stop its current reply first." }
-        update { it.copy(pending = PendingMessage(org, room, snapshot.parent?.id, body.trim(), askAgent = ask, mentions = mentions.filter { id -> snapshot.people.any { it.id == id && body.contains("@${it.name}") } })) }
+        update { it.copy(pending = PendingMessage(org, room, snapshot.parent?.id, body.trim().ifBlank { "Attached ${files.size} file(s)" }, askAgent = ask, mentions = mentions.filter { id -> snapshot.people.any { it.id == id && body.contains("@${it.name}") } }, attachments = files.map { it.attachment.id })) }
         retry()
     }
     suspend fun retry() {
@@ -205,8 +262,8 @@ class RoomsController(val context: PluginContext, val scope: CoroutineScope) {
         sending = true; update { it.copy(delivery = "Sending…") }; val epoch = generation
         var posted: Message? = null
         try {
-            val message = repository.post(pending.org, pending.room.id, pending.body, pending.requestId, pending.parent, pending.assistant, pending.mentions)
-            current(epoch); update { it.copy(pending = null, error = null, delivery = "Sent") }; drafts.remove(pending.parent ?: pending.room.id); remember(storedDraftKey(pending.parent ?: pending.room.id), "")
+            val message = repository.post(pending.org, pending.room.id, pending.body, pending.requestId, pending.parent, pending.assistant, pending.mentions, pending.attachments)
+            current(epoch); update { it.copy(pending = null, error = null, delivery = "Sent", uploads = it.uploads.filterNot { d -> d.attachment.id in pending.attachments }) }; drafts.remove(pending.parent ?: pending.room.id); remember(storedDraftKey(pending.parent ?: pending.room.id), "")
             if (state.value.room?.id == pending.room.id) refresh()
             posted = message
         } catch (e: Exception) { if (epoch == generation) update { it.copy(delivery = "Not sent. Retry when connected.") }; throw e } finally { sending = false }
@@ -258,5 +315,5 @@ class RoomsController(val context: PluginContext, val scope: CoroutineScope) {
     fun setTools(tools: Set<String>) { update { it.copy(selectedTools = tools) } }
     suspend fun loadMemory() { val org = state.value.org ?: return; val epoch = generation; val memory = repository.memory(org); current(epoch); update { it.copy(memory = memory) } }
     suspend fun saveMemory(body: String) { val org = state.value.org ?: return; val epoch = generation; val memory = repository.saveMemory(org, state.value.memory, body); current(epoch); update { it.copy(memory = memory) } }
-    fun dispose() { toastIds.forEach { context.notificationProvider?.dismiss(it) }; stopAgent(); scope.cancel(); drafts.clear() }
+    fun dispose() { uploadJobs.values.forEach { it.cancel() }; toastIds.forEach { context.notificationProvider?.dismiss(it) }; stopAgent(); scope.cancel(); drafts.clear() }
 }

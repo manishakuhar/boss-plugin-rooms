@@ -13,3 +13,7 @@ Local test coverage: nonmember/anonymous denials, direct table denial, personal 
 Still required against a staging copy of BOSS: actual schema compatibility, real JWTs and PostgREST responses, concurrent revocation/writes with separate connections, platform admin policy, data retention/backups/export and release rollout. PGlite executes PostgreSQL locally but its fixture does not establish any of those deployment properties.
 
 Apply once; it intentionally does not overwrite pre-existing objects. Roll back only under the backend owner's data-retention procedure; dropping these tables loses conversations and private saved context.
+
+## Ordered follow-up migrations
+
+Apply 001_rooms.sql, then 002_delivery.sql, then 003_attachments.sql. They are additive and versioned; do not edit an already-applied migration. Internal core/delivery functions must remain inaccessible to authenticated and anonymous clients. Only the outer boss_rooms_v1 RPC is public to signed-in users. See docs/MESSAGING-DELIVERY.md and docs/ATTACHMENTS.md for SDK and production storage/event dependencies. Attachment metadata migration alone does not enable production file transfers.
