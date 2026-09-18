@@ -16,6 +16,13 @@ class RoomsNavigationTest {
         val saved = mutableMapOf<String,String>()
         var extraRooms = emptyList<Room>()
         var gateway: AiGatewayAPI? = null
+        val notices = mutableListOf<String>()
+        val dismissed = mutableListOf<String>()
+        val notifications = Proxy.newProxyInstance(NotificationProvider::class.java.classLoader, arrayOf(NotificationProvider::class.java)) { _, method, args -> when(method.name) {
+            "showToast" -> { notices.add(args!![0] as String); "notice-${notices.size}" }
+            "dismiss" -> { dismissed.add(args!![0] as String); Unit }
+            else -> null
+        }} as NotificationProvider
         var inbox = emptyList<InboxEntry>()
         val reads = mutableListOf<JsonObject>()
         val posts = mutableListOf<Message>()
@@ -49,6 +56,7 @@ class RoomsNavigationTest {
         }
         val context = Proxy.newProxyInstance(PluginContext::class.java.classLoader,arrayOf(PluginContext::class.java)) { _, m, args -> when(m.name) {
             "getPluginAPI" -> if (args?.firstOrNull() == AiGatewayAPI::class.java) gateway else null
+            "getNotificationProvider" -> notifications
             "getAuthDataProvider" -> auth
             "getSupabaseDataProvider" -> db
             "getPluginStorageFactory" -> object : PluginStorageFactory { override fun createStorage(pluginId:String) = storage }
@@ -57,6 +65,21 @@ class RoomsNavigationTest {
         var controller = newController()
         fun newController() = RoomsController(context,CoroutineScope(SupervisorJob()+Dispatchers.Unconfined))
         override fun close() = controller.dispose()
+    }
+    @Test fun alertsHideContentDeduplicateAcrossRestartAndDismissOnAccountChange() = runBlocking {
+        Host(1).use { h ->
+            val room = h.controller.state.value.room!!
+            h.inbox = listOf(InboxEntry(room.id, 1, events = listOf(Message("alert", 8, room.id, author_id = "other", body = "Secret project details"))))
+            h.controller.viewing(true); h.controller.refreshInbox(); assertTrue(h.notices.isEmpty())
+            h.controller.viewing(false); h.controller.refreshInbox(); h.controller.refreshInbox()
+            assertEquals(listOf("New message in Rooms"), h.notices)
+            h.controller.dispose(); assertEquals(listOf("notice-1"),h.dismissed)
+            h.controller = h.newController(); h.controller.refreshInbox(); assertEquals(1,h.notices.size)
+            h.inbox = listOf(InboxEntry(room.id, 1, events = listOf(Message("next", 9, room.id, author_id = "other", body = "Other private details"))))
+            h.controller.refreshInbox(); assertEquals(2,h.notices.size)
+            h.user.value = null
+            assertTrue("notice-2" in h.dismissed)
+        }
     }
     @Test fun readsRequireVisibleLatestAndDoNotRepeatOrCrossThreads() = runBlocking {
         Host(1).use { h ->

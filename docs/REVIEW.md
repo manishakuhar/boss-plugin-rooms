@@ -22,7 +22,7 @@ python3 scripts/verify-artifact.py
 
 On Linux, run the Gradle command under `xvfb-run -a`. CI runs both Linux and macOS. Tests use synthetic data and need neither provider credentials nor production database access. The HTTP tests create and remove their own temporary database; they do not reset an existing demo database.
 
-Local validation before submission: 36 Kotlin tests, SQL permission tests, two-client HTTP/restart tests, and real configured-provider checks inside the custom BOSS trial. Live checks exercised approved reading, exact approved sending, declined sending, and reply persistence. Live actions used only fictional accounts and local rooms. Connected external plugins were not invoked.
+Local validation before submission: 37 Kotlin tests, SQL permission tests, two-client HTTP/restart tests, and real configured-provider checks inside the custom BOSS trial. Live checks exercised approved reading, exact approved sending, declined sending, and reply persistence. Live actions used only fictional accounts and local rooms. Connected external plugins were not invoked.
 
 ## Review-sensitive behavior
 
