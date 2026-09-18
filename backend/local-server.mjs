@@ -35,7 +35,7 @@ export async function startLocalServer({ directory, port = 0 } = {}) {
       create table auth.users(id uuid primary key,email text,raw_user_meta_data jsonb default '{}');
       create function auth.uid() returns uuid language sql stable as $$select nullif(current_setting('test.actor',true),'')::uuid$$;
       create table public.organisations(id uuid primary key,name text);
-      create table public.organisation_members(org_id uuid,user_id uuid,status text);
+      create table public.organisation_members(org_id uuid not null,user_id uuid not null,status text not null check(status in ('active','pending','invited')),unique(org_id,user_id));
       create table public.local_rooms_schema(hash text not null);
     `);
     try {

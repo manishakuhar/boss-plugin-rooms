@@ -1,7 +1,7 @@
 process.on('uncaughtException',e=>{console.error(e.message,e.internalQuery||'');process.exit(1)});
 import {PGlite} from '@electric-sql/pglite';import {readFile} from 'node:fs/promises';import assert from 'node:assert/strict';
 const db=new PGlite();
-await db.exec(`create schema auth;create role anon;create role authenticated;create table auth.users(id uuid primary key,email text,raw_user_meta_data jsonb default '{}');create function auth.uid() returns uuid language sql stable as $$select nullif(current_setting('test.actor',true),'')::uuid$$;create table public.organisations(id uuid primary key,name text);create table public.organisation_members(org_id uuid,user_id uuid,status text);`);
+await db.exec(`create schema auth;create role anon;create role authenticated;create table auth.users(id uuid primary key,email text,raw_user_meta_data jsonb default '{}');create function auth.uid() returns uuid language sql stable as $$select nullif(current_setting('test.actor',true),'')::uuid$$;create table public.organisations(id uuid primary key,name text);create table public.organisation_members(org_id uuid not null,user_id uuid not null,status text not null check(status in ('active','pending','invited')),unique(org_id,user_id));`);
 const a='00000000-0000-0000-0000-000000000001',b='00000000-0000-0000-0000-000000000002',c='00000000-0000-0000-0000-000000000003',org='10000000-0000-0000-0000-000000000001';
 await db.query(`insert into auth.users(id,email) values($1,'a@example.test'),($2,'b@example.test'),($3,'c@example.test')`,[a,b,c]);await db.query(`insert into organisations values($1,'Test org')`,[org]);await db.query(`insert into organisation_members values($1,$2,'active'),($1,$3,'active'),($1,$4,'active')`,[org,a,b,c]);
 await db.exec(await readFile(new URL('./001_rooms.sql',import.meta.url),'utf8'));
@@ -25,7 +25,13 @@ const dmMessage=await call('post',{room_id:direct.id,body:'Private direct update
 await actor(b);assert.equal((await call('messages',{room_id:direct.id}))[0].id,dmMessage.id);
 await actor(c);await denied(()=>call('messages',{room_id:direct.id}));await denied(()=>call('search',{room_id:direct.id,query:'Private'}));await denied(()=>call('message',{room_id:direct.id,message_id:dmMessage.id}));assert(!(await call('list')).some(r=>r.id===direct.id));await actor(a);
 await call('update',{room_id:rid,name:'Launch',members:[a],owner_id:a});await actor(b);await denied(()=>call('messages',{room_id:rid}));
-await db.exec('reset role');await db.query("update organisation_members set status='removed' where user_id=$1",[a]);await actor(a);await denied(()=>call('memory'));await denied(()=>call('messages',{room_id:personal.id}));await db.exec('reset role');await db.query("update organisation_members set status='active' where user_id=$1",[a]);await actor(a);
+await db.exec('reset role');await db.query("delete from organisation_members where user_id=$1",[a]);await actor(a);await denied(()=>call('memory'));await denied(()=>call('messages',{room_id:personal.id}));await db.exec('reset role');await db.query("insert into organisation_members values($1,$2,'active')",[org,a]);await actor(a);
+// BOSS membership uses active/pending/invited; removal deletes the row.
+for (const status of ['pending','invited']) {
+ await db.exec('reset role');await db.query('update organisation_members set status=$1 where org_id=$2 and user_id=$3',[status,org,c]);await actor(c);
+ assert.equal((await call('organizations')).length,0);await denied(()=>call('list'));await denied(()=>call('memory'));
+}
+await db.exec('reset role');await db.query("update organisation_members set status='active' where org_id=$1 and user_id=$2",[org,c]);await actor(a);
 const pub=await call('create',{kind:'room',name:'Open',visibility:'organization'});await actor(c);await denied(()=>call('messages',{room_id:pub.id}));await call('join',{room_id:pub.id});assert.deepEqual(await call('messages',{room_id:pub.id}),[]);await call('leave',{room_id:pub.id});await denied(()=>call('messages',{room_id:pub.id}));await actor('');await denied(()=>call('organizations'));
 await actor(a);
 const pagesRoom=await call('create',{kind:'room',name:'Paging',members:[]});

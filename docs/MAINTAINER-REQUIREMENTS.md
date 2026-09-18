@@ -13,6 +13,19 @@ The implementation and test fixture are submitted for review. Neither the public
 | Privacy and administration policy | Per-user/per-organization assistant memory, membership-gated conversations, explicit approval before cross-conversation reads or sends | Confirm permitted AI providers/data sharing for organizations, administrator access policy, retention/deletion/export/backup requirements and the operational owner. The current prototype is not end-to-end encrypted and must not be advertised as such. |
 | Release operations | Bounded agent runs, cancellable work, visible errors and documented local limitations | Confirm existing platform quotas/rate limits and operational monitoring, deployment sequence and rollback ownership. Database rollout must precede enabling shared Rooms for users. Disable/rollback must not silently delete conversation data. |
 
+## Follow-up validation of the requests
+
+Checked against the BOSS organization migrations, `SupabaseDataProviderImpl`, store ownership/signature code, the Rooms SQL proposal and plugin manifest. The backend request is an extension of the existing BOSS Supabase service, not a request for a new database product, authentication system, realtime service or credential store. The existing `BossConsole/supabase/migrations` directory is the proposed migration destination, subject to its owner's review. Store signing should use the existing publishing service; we are not requesting signing keys.
+
+Two policy choices require explicit answers before finalizing the migration:
+
+- **Offboarding and deletion:** the proposed foreign keys currently have no cascade/cleanup behavior for stored conversations, message authors and assistant memory. They can prevent deleting a referenced user or organization. Confirm ownership transfer, archival/purge/export and backup treatment before adding those references in production. Define whether rejoining an organization restores previous room access; the current implementation checks active membership but retains room membership IDs. We will implement the agreed behavior and regression tests.
+- **Server-side enablement and roles:** the RPC currently admits any active organization member, with additional room membership/ownership checks. Hiding or disabling the Toolbox plugin does not revoke authenticated RPC access. Confirm whether Rooms needs an organization enablement flag or distinct create/manage permissions, and whether the member directory may show every active member with email as a fallback name. Any agreed restriction must be enforced on the server, not just in the UI.
+
+An organization membership in upstream BOSS has status `active`, `pending` or `invited`; removal deletes the row through `remove_organisation_member`. The local fixture now follows those statuses and tests row-deletion revocation as well as pending/invited denial. It still is not a substitute for real schema/JWT/concurrency validation.
+
+No additional tables for unread state, attachments or notification delivery are requested for the current polling-based scope. Those are future features, not hidden installation prerequisites.
+
 ## Work owned by this contribution
 
 These are implementation/verification tasks, not requests for maintainers to write our code:
@@ -26,7 +39,7 @@ These are implementation/verification tasks, not requests for maintainers to wri
 
 ## Submitted evidence and limits
 
-35 plugin tests and the SQL/HTTP suites passed locally and in Linux/macOS CI. Live configured-provider checks passed against fictional local rooms for approved reads, approved sends, declined sends and reply persistence. The host navigation checks passed locally; subsequent upstream CI exposed a test-fixture naming collision with the window-branding convention, which is being corrected in the host PR.
+35 plugin tests and the SQL/HTTP suites passed locally and in Linux/macOS CI. Live configured-provider checks passed against fictional local rooms for approved reads, approved sends, declined sends and reply persistence. The host navigation checks passed locally; subsequent upstream CI exposed a test-fixture naming collision with the window-branding convention, which was corrected in host commit `6d761ac09`; affected tests and quality checks passed locally.
 
 Still outstanding: official store registration/signing, actual-backend staging evidence, lifecycle/external-tool validation and the maintainer decisions above. These remain draft release gates; no production migration or store deployment has been performed.
 
