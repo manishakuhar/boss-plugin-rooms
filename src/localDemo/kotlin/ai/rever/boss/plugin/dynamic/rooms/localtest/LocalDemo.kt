@@ -3,6 +3,7 @@ package ai.rever.boss.plugin.dynamic.rooms.localtest
 import ai.rever.boss.plugin.api.*
 import ai.rever.boss.plugin.api.Panel.Companion.left
 import ai.rever.boss.plugin.api.Panel.Companion.bottom
+import ai.rever.boss.plugin.dynamic.rooms.RoomsAttachmentProvider
 import ai.rever.boss.plugin.dynamic.rooms.RoomsController
 import ai.rever.boss.plugin.dynamic.rooms.RoomsScreen
 import ai.rever.boss.plugin.dynamic.rooms.TabOpeningPanelInfo
@@ -81,8 +82,31 @@ class LocalHost(private val base: PluginContext? = null, initialUser: String = "
             catch (e: Exception) { Result.failure(e) }
         }
     }
+    private val attachmentStorage = object : RoomsAttachmentProvider {
+        private suspend fun request(org: String, room: String, id: String, bytes: ByteArray?): ByteArray {
+            val selected = key
+            val response = runInterruptible(Dispatchers.IO) {
+                val data = connection(); val uri = URI(data["url"]!!.jsonPrimitive.content)
+                check(uri.scheme == "http" && uri.host == "127.0.0.1" && uri.userInfo == null && uri.query == null && uri.rawPath.isNullOrEmpty())
+                listOf(org,room,id).forEach { UUID.fromString(it) }
+                val token = data["users"]!!.jsonArray.map { it.jsonObject }.first { it["key"]!!.jsonPrimitive.content == selected }["token"]!!.jsonPrimitive.content
+                val request = HttpRequest.newBuilder(uri.resolve("/attachments/$id?org=$org&room=$room")).timeout(Duration.ofSeconds(60)).header("Authorization", "Bearer $token")
+                if (bytes != null) request.PUT(HttpRequest.BodyPublishers.ofByteArray(bytes)) else request.GET()
+                val result = http.send(request.build(), HttpResponse.BodyHandlers.ofInputStream())
+                result.body().use { input ->
+                    check(result.statusCode() == 200) { "File request failed." }
+                    input.readNBytes(10485761).also { check(it.size <= 10485760) }
+                }
+            }
+            check(key == selected) { "Account changed." }
+            return response
+        }
+        override suspend fun upload(org: String, room: String, id: String, bytes: ByteArray, progress: (Int) -> Unit) { progress(0); request(org,room,id,bytes); progress(100) }
+        override suspend fun download(org: String, room: String, id: String): ByteArray = request(org,room,id,null)
+    }
     val context = Proxy.newProxyInstance(PluginContext::class.java.classLoader, arrayOf(PluginContext::class.java)) { _, method, args ->
         when (method.name) {
+            "getPluginAPI" -> if (args?.firstOrNull() == RoomsAttachmentProvider::class.java) attachmentStorage else if (base == null) null else method.invoke(base, *(args ?: emptyArray()))
             "getAuthDataProvider" -> auth
             "getSupabaseDataProvider" -> database
             // Keep test identities away from real external-tool side effects.
@@ -140,6 +164,9 @@ object RoomsLocalPlugin : DynamicPlugin {
         context.panelRegistry.registerPanel(TabOpeningPanelInfo(LocalPanelInfo, context)) { component, info -> LocalPanel(component, info, context) }
         context.pluginScope.launch {
             delay(15000)
+            if (System.getenv("ROOMS_ATTACHMENT_SMOKE") == "1") {
+                try { attachmentSmoke(context) } catch (e: Exception) { println("ROOMS_ATTACHMENT_SMOKE FAIL: ${e.javaClass.simpleName}: ${e.message}") }
+            }
             if (System.getenv("ROOMS_TAB_SMOKE") == "1") {
                 try {
                     delay(15000)

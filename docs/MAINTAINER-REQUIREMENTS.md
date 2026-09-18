@@ -48,3 +48,7 @@ Related proposals: [plugin PR #1](https://github.com/manishakuhar/boss-plugin-ro
 ## Messaging extension
 
 Review additive `backend/002_delivery.sql` with the Rooms schema. It adds reads, notification preferences and mention recipients. The current SDK permits in-app alerts only. Closed-app/OS delivery requires an approved server event transport and host notification integration, including click routing, sound preferences and cross-device deduplication. See [messaging scope](MESSAGING-DELIVERY.md). These requests are proposals, not deployed infrastructure.
+
+## Attachment extension
+
+Review `backend/003_attachments.sql` and the [attachment broker contract and deployment requirements](ATTACHMENTS.md). A private bucket alone is insufficient: we also need an authenticated broker/host adapter, server-only upload finalization after validation/scanning, quotas, cleanup and download revocation policy. The local test adapter is implemented; no production adapter or storage has been provisioned. Attachment bytes are never automatically included in AI context.

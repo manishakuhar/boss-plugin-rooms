@@ -47,8 +47,8 @@ class RoomsNavigationTest {
                 })
             }
         }
-        val context = Proxy.newProxyInstance(PluginContext::class.java.classLoader,arrayOf(PluginContext::class.java)) { _, m, _ -> when(m.name) {
-            "getPluginAPI" -> gateway
+        val context = Proxy.newProxyInstance(PluginContext::class.java.classLoader,arrayOf(PluginContext::class.java)) { _, m, args -> when(m.name) {
+            "getPluginAPI" -> if (args?.firstOrNull() == AiGatewayAPI::class.java) gateway else null
             "getAuthDataProvider" -> auth
             "getSupabaseDataProvider" -> db
             "getPluginStorageFactory" -> object : PluginStorageFactory { override fun createStorage(pluginId:String) = storage }

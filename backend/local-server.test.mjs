@@ -43,6 +43,25 @@ try{
  assert.equal((await call('leo','inbox')).data.some(x=>x.room_id===room),false);
  assert.equal((await call('leo','mark_read',{room_id:room,seq:mention.seq})).status,403);
  await call('maya','notification_preference',{room_id:room,mode:'mute'});
+ // Private attachment drafts, byte validation, publication and deletion access.
+ const fileId=crypto.randomUUID();
+ assert.equal((await call('manisha','attachment_begin',{room_id:room,id:fileId,name:'note.txt',size:5,mime:'text/plain'})).status,200);
+ const fileRequest=async(key,method,body)=>{
+   const user=running.users.find(u=>u.key===key);
+   return fetch(running.url+'/attachments/'+fileId+'?org='+demoOrg+'&room='+room,{method,headers:{Authorization:'Bearer '+user.token},body});
+ };
+ assert.equal((await fileRequest('maya','GET')).status,403);
+ assert.equal((await fileRequest('manisha','PUT','oversized')).status,413);
+ assert.equal((await fileRequest('manisha','PUT','hello')).status,200);
+ assert.equal((await fileRequest('maya','GET')).status,403);
+ const fileMessage=(await call('manisha','post',{room_id:room,body:'Attached note',attachments:[fileId],request_id:crypto.randomUUID()})).data;
+ assert.equal(await (await fileRequest('maya','GET')).text(),'hello');
+ assert.equal((await fileRequest('leo','GET')).status,403);
+ assert.equal((await fileRequest('manisha','PUT','other')).status,409);
+ assert.equal((await call('maya','attachments',{room_id:room})).data.length,1);
+ assert.equal((await call('manisha','delete',{room_id:room,message_id:fileMessage.id,revision:1})).status,200);
+ assert.equal((await fileRequest('maya','GET')).status,403);
+ assert.equal((await call('maya','attachments',{room_id:room})).data.length,0);
  const personal=(await call('manisha','create',{kind:'assistant',name:'My assistant',members:[]})).data;
  assert.equal((await call('maya','messages',{room_id:personal.id,actor:a.id})).status,403);
  assert.equal((await call('manisha','save_memory',{body:'Local private background',revision:0})).status,200);
@@ -50,7 +69,7 @@ try{
  const rejected=await fetch(running.url+'/rpc/boss_rooms_v1',{method:'POST',headers:{'Content-Type':'application/json',Origin:'https://example.com',Authorization:'Bearer '+a.token},body:'{}'});assert.equal(rejected.status,403);
  const unauth=await fetch(running.url+'/rpc/boss_rooms_v1',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});assert.equal(unauth.status,401);
  await running.close();running=await startLocalServer({directory});
- const restored=await call('maya','messages',{room_id:room});assert.equal(restored.status,200);assert.equal(restored.data.length,8);
+ const restored=await call('maya','messages',{room_id:room});assert.equal(restored.status,200);assert.equal(restored.data.length,9);
  assert.equal((await call('manisha','memory')).data.body,'Local private background');
  assert.equal((await inbox()).data.find(x=>x.room_id===room).unread,0);
  assert.equal((await inbox()).data.find(x=>x.room_id===room).mode,'mute');

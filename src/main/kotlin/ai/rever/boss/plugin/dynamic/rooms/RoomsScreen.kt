@@ -24,6 +24,13 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.serialization.json.*
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.Dispatchers
+import androidx.compose.ui.graphics.toComposeImageBitmap
+import androidx.compose.ui.ExperimentalComposeUiApi
+import androidx.compose.foundation.draganddrop.dragAndDropTarget
+import androidx.compose.ui.draganddrop.*
+import androidx.compose.material.icons.outlined.AttachFile
 
 @Composable fun RoomsScreen(controller: RoomsController) {
     val state by controller.state.collectAsState()
@@ -237,13 +244,33 @@ private fun unreadLabel(state: RoomsState, room: Room): String = state.inbox.fir
     }
 }
 
+@OptIn(ExperimentalComposeUiApi::class)
 @Composable private fun Composer(controller: RoomsController, state: RoomsState, short: Boolean) {
     val key = state.parent?.id ?: state.room!!.id
     var mentions by remember(key, state.pending) { mutableStateOf<List<String>>(emptyList()) }
     var pickingMention by remember(key) { mutableStateOf(false) }
     var draft by remember(key, state.pending) { mutableStateOf(controller.drafts[key].orEmpty()) }
     LaunchedEffect(key) { draft = controller.restoreDraft(key) }
-    Column(Modifier.fillMaxWidth().padding(if (short) 4.dp else 12.dp)) {
+    val dropTarget = remember(controller) { object : DragAndDropTarget {
+        override fun onDrop(event: DragAndDropEvent): Boolean = runCatching {
+            val files = event.awtTransferable.getTransferData(java.awt.datatransfer.DataFlavor.javaFileListFlavor) as? List<*> ?: return false
+            if (files.size > 5) { controller.fail("Attach up to five files at once."); return false }
+            files.filterIsInstance<java.io.File>().filter { it.isFile }.forEach { controller.attach(it.absolutePath) }
+            true
+        }.getOrDefault(false)
+    } }
+    Column(Modifier.fillMaxWidth().padding(if (short) 4.dp else 12.dp).dragAndDropTarget(
+        shouldStartDragAndDrop = { it.awtTransferable.isDataFlavorSupported(java.awt.datatransfer.DataFlavor.javaFileListFlavor) }, target = dropTarget,
+    )) {
+        val uploads = state.uploads.filter { it.attachment.room_id == state.room?.id && it.parent == state.parent?.id }
+        if (uploads.isNotEmpty()) Column(Modifier.heightIn(max = 110.dp).verticalScroll(rememberScrollState())) {
+            uploads.forEach { upload -> Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(upload.attachment.name, Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(if (upload.ready) "Ready" else if (upload.error != null) "Failed" else "Uploading…", style = MaterialTheme.typography.caption)
+                if (upload.error != null) TextButton(onClick = { controller.upload(upload.attachment.id) }) { Text("Retry") }
+                TextButton(onClick = { controller.removeUpload(upload.attachment.id) }) { Text("Remove") }
+            } }
+        }
         OutlinedTextField(draft, { if (it.length <= 16000) { draft = it; controller.updateDraft(key, it) } }, label = { Text(if (state.room?.kind == "assistant") "Ask your assistant…" else "Message, or mention @Agent…") }, modifier = Modifier.fillMaxWidth().heightIn(min = if (short) 48.dp else 70.dp, max = if (short) 68.dp else 140.dp).onPreviewKeyEvent { event ->
             if (event.type == KeyEventType.KeyDown && event.key == Key.Enter && !event.isShiftPressed && state.status == null && state.pending == null && draft.isNotBlank()) {
                 controller.launch { controller.send(draft, mentions) }; true
@@ -251,6 +278,10 @@ private fun unreadLabel(state: RoomsState, room: Room): String = state.inbox.fir
         })
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text(if (state.room?.kind == "assistant") "Private · uses your configured AI provider" else "Shared with conversation members", Modifier.weight(1f), style = MaterialTheme.typography.caption)
+            IconButton(onClick = {
+                if (controller.attachmentProvider == null) controller.fail("Attachments need an authenticated storage adapter from your BOSS administrator.")
+                else controller.context.filePickerProvider?.pickFile("Attach file", listOf("png", "jpg", "jpeg", "pdf", "txt", "md", "csv")) { it?.let(controller::attach) }
+            }) { Icon(Icons.Outlined.AttachFile, "Attach file") }
             if (state.room?.kind != "assistant") Box {
                 TextButton(onClick = { pickingMention = true }) { Text("@") }
                 DropdownMenu(pickingMention, onDismissRequest = { pickingMention = false }) {
@@ -263,7 +294,7 @@ private fun unreadLabel(state: RoomsState, room: Room): String = state.inbox.fir
                     }
                 }
             }
-            Button(onClick = { controller.launch { controller.send(draft, mentions) } }, enabled = draft.isNotBlank() && state.pending == null && state.status == null) { Text("Send") }
+            Button(onClick = { controller.launch { controller.send(draft, mentions) } }, enabled = (draft.isNotBlank() || uploads.isNotEmpty()) && uploads.all { it.ready } && state.pending == null && state.status == null) { Text("Send") }
         }
     }
 }
@@ -299,7 +330,36 @@ private fun unreadLabel(state: RoomsState, room: Room): String = state.inbox.fir
             }
         }
         SelectionContainerText(if (message.deleted) "Message deleted" else message.body)
+        if (!message.deleted) state.attachments.filter { it.message_id == message.id }.forEach { attachment -> AttachmentCard(attachment, controller) }
     }
+}
+@Composable private fun AttachmentCard(attachment: Attachment, controller: RoomsController) {
+    var preview by remember(attachment.id) { mutableStateOf<androidx.compose.ui.graphics.ImageBitmap?>(null) }
+    var loading by remember { mutableStateOf(false) }
+    Row(Modifier.fillMaxWidth().border(1.dp, MaterialTheme.colors.onSurface.copy(alpha = 0.15f), MaterialTheme.shapes.small).padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) { Text(attachment.name, maxLines = 1, overflow = TextOverflow.Ellipsis); Text("${(attachment.size + 1023) / 1024} KB", style = MaterialTheme.typography.caption) }
+        if (attachment.mime.startsWith("image/")) TextButton(enabled = !loading, onClick = { controller.launch {
+            loading = true
+            try {
+                val bytes = controller.download(attachment)
+                preview = withContext(Dispatchers.IO) {
+                    javax.imageio.ImageIO.createImageInputStream(bytes.inputStream()).use { input ->
+                        val readers = javax.imageio.ImageIO.getImageReaders(input); check(readers.hasNext()) { "Unsupported image." }
+                        val reader = readers.next()
+                        try { reader.input = input; check(reader.getWidth(0).toLong() * reader.getHeight(0) <= 16000000) { "Image is too large to preview. Download it instead." } } finally { reader.dispose() }
+                    }
+                    org.jetbrains.skia.Image.makeFromEncoded(bytes).toComposeImageBitmap()
+                }
+            } finally { loading = false }
+        } }) { Text(if (loading) "Loading…" else "Preview") }
+        TextButton(onClick = {
+            controller.context.filePickerProvider?.pickSaveFile(attachment.name, emptyList()) { path -> controller.launch {
+                val bytes = controller.download(attachment)
+                withContext(Dispatchers.IO) { java.nio.file.Files.write(java.nio.file.Path.of(path), bytes) }
+            } }
+        }) { Text("Download") }
+    }
+    preview?.let { bitmap -> RoomsDialog(attachment.name, { preview = null }) { Image(bitmap, attachment.name, Modifier.fillMaxWidth().heightIn(max = 420.dp)) } }
 }
 @Composable private fun SelectionContainerText(text: String) { androidx.compose.foundation.text.selection.SelectionContainer { Text(text) } }
 @Composable private fun RoomsDialog(title: String, close: () -> Unit, content: @Composable ColumnScope.() -> Unit) {

@@ -53,8 +53,8 @@ class RoomsRepository(private val transport: RoomsTransport) {
         before?.let { fields.add("before" to JsonPrimitive(it)) }
         return json.decodeFromJsonElement(raw("messages", org, *fields.toTypedArray()))
     }
-    suspend fun post(org: String, room: String, body: String, request: String, parent: String? = null, assistant: Boolean = false, mentions: List<String> = emptyList()): Message =
-        json.decodeFromJsonElement(raw("post", org, "room_id" to s(room), "body" to s(body), "mentions" to ids(mentions), "request_id" to s(request), "parent_id" to (parent?.let(::s) ?: JsonNull), "author_kind" to s(if (assistant) "assistant" else "human")))
+    suspend fun post(org: String, room: String, body: String, request: String, parent: String? = null, assistant: Boolean = false, mentions: List<String> = emptyList(), attachments: List<String> = emptyList()): Message =
+        json.decodeFromJsonElement(raw("post", org, "room_id" to s(room), "body" to s(body), "mentions" to ids(mentions), "attachments" to ids(attachments), "request_id" to s(request), "parent_id" to (parent?.let(::s) ?: JsonNull), "author_kind" to s(if (assistant) "assistant" else "human")))
     suspend fun search(org: String, room: String, query: String): List<Message> = json.decodeFromJsonElement(raw("search", org, "room_id" to s(room), "query" to s(query)))
     suspend fun pins(org: String, room: String): List<Message> = json.decodeFromJsonElement(raw("pins", org, "room_id" to s(room)))
     suspend fun pin(org: String, message: Message, pinned: Boolean): Message = json.decodeFromJsonElement(raw("pin", org, "room_id" to s(message.room_id), "message_id" to s(message.id), "revision" to JsonPrimitive(message.revision), "pinned" to JsonPrimitive(pinned)))
