@@ -16,6 +16,8 @@ class RoomsNavigationTest {
         val saved = mutableMapOf<String,String>()
         var extraRooms = emptyList<Room>()
         var gateway: AiGatewayAPI? = null
+        var inbox = emptyList<InboxEntry>()
+        val reads = mutableListOf<JsonObject>()
         val posts = mutableListOf<Message>()
         val auth = Proxy.newProxyInstance(AuthDataProvider::class.java.classLoader, arrayOf(AuthDataProvider::class.java)) { _, m, _ -> if (m.name == "getCurrentUser") user else null } as AuthDataProvider
         val storage = Proxy.newProxyInstance(PluginStorageProvider::class.java.classLoader, arrayOf(PluginStorageProvider::class.java)) { _, m, a -> when(m.name) {
@@ -32,6 +34,8 @@ class RoomsNavigationTest {
                 val uid = user.value!!.id
                 val room = Room("$org-$uid",org,"My assistant","assistant",owner_id=uid,members=listOf(uid))
                 return Result.success(when(a["operation"]!!.jsonPrimitive.content) {
+                    "inbox" -> json.encodeToString(inbox)
+                    "mark_read" -> { reads += p; "{}" }
                     "organizations" -> json.encodeToString(orgs)
                     "directory" -> json.encodeToString(listOf(Person(uid,uid)))
                     "list" -> json.encodeToString(listOf(room) + extraRooms)
@@ -53,6 +57,17 @@ class RoomsNavigationTest {
         var controller = newController()
         fun newController() = RoomsController(context,CoroutineScope(SupervisorJob()+Dispatchers.Unconfined))
         override fun close() = controller.dispose()
+    }
+    @Test fun readsRequireVisibleLatestAndDoNotRepeatOrCrossThreads() = runBlocking {
+        Host(1).use { h ->
+            h.controller.markVisibleRead(10); assertTrue(h.reads.isEmpty())
+            h.controller.viewing(true); h.controller.markVisibleRead(10); h.controller.markVisibleRead(9)
+            assertEquals(1,h.reads.size)
+            h.controller.thread(Message("parent",11,"org1-me",author_id="me",body="root"))
+            h.controller.markVisibleRead(12)
+            assertEquals("parent",h.reads.last()["parent_id"]!!.jsonPrimitive.content)
+            h.controller.viewing(false); h.controller.markVisibleRead(13); assertEquals(2,h.reads.size)
+        }
     }
     @Test fun immediateAssistantReplyIsPersistedAfterUserWriteCompletes() = runBlocking {
         Host(1).use { h ->

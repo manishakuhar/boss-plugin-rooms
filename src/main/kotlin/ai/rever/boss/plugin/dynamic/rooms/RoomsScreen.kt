@@ -23,9 +23,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.serialization.json.*
+import kotlinx.coroutines.launch
 
 @Composable fun RoomsScreen(controller: RoomsController) {
     val state by controller.state.collectAsState()
+    val windowFocused = androidx.compose.ui.platform.LocalWindowInfo.current.isWindowFocused
+    DisposableEffect(controller) { onDispose { controller.viewing(false) } }
     var dialog by remember { mutableStateOf<String?>(null) }
     var mobileNav by remember { mutableStateOf(false) }
     var results by remember { mutableStateOf<List<Message>>(emptyList()) }
@@ -59,6 +62,7 @@ import kotlinx.serialization.json.*
                                     DropdownMenuItem(onClick = { expanded = false; controller.launch { results = controller.repository.pins(state.org!!, state.room!!.id); dialog = "pins" } }) { Text("Pinned messages") }
                                     if (state.room?.kind == "assistant") DropdownMenuItem(onClick = { expanded = false; controller.launch { controller.loadMemory(); dialog = "memory" } }) { Text("Assistant memory") }
                                     DropdownMenuItem(onClick = { expanded = false; dialog = "tools" }) { Text("Connected tools") }
+                                    DropdownMenuItem(onClick = { expanded = false; dialog = "notifications" }) { Text("Notifications") }
                                     DropdownMenuItem(onClick = { expanded = false; dialog = "details" }) { Text("Conversation details") }
                                 }
                             }
@@ -71,7 +75,7 @@ import kotlinx.serialization.json.*
                     } }
                     if (state.loading) LinearProgressIndicator(Modifier.fillMaxWidth())
                     state.pending?.let { pending -> Column(Modifier.fillMaxWidth().padding(12.dp)) {
-                        Text("Delivery not yet confirmed · ${pending.room.name}", fontWeight = FontWeight.Bold)
+                        Text("${state.delivery ?: "Delivery not yet confirmed"} · ${pending.room.name}", fontWeight = FontWeight.Bold)
                         Text(pending.body, maxLines = 3, overflow = TextOverflow.Ellipsis)
                         TextButton(onClick = { controller.launch { controller.retry() } }) { Text("Retry same message") }
                     } }
@@ -102,6 +106,11 @@ import kotlinx.serialization.json.*
                                 positioned = true
                             }
                         }
+                        LaunchedEffect(windowFocused, positioned, listState.canScrollForward, visibleMessages.lastOrNull()?.seq, state.conversationVisit) {
+                            controller.viewing(windowFocused && positioned && !listState.canScrollForward)
+                            if (windowFocused && positioned && !listState.canScrollForward) visibleMessages.lastOrNull()?.let { controller.launch { controller.markVisibleRead(it.seq) } }
+                        }
+                        if (positioned && listState.canScrollForward) TextButton(onClick = { controller.scope.launch { listState.animateScrollToItem(listState.layoutInfo.totalItemsCount - 1) } }) { Text("Jump to latest") }
                         LazyColumn(Modifier.weight(1f).fillMaxWidth().padding(horizontal = 16.dp).testTag("conversation-messages"), state = listState, verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             if ((if (state.parent == null) state.messages else state.replies).size >= 100) item { TextButton(onClick = { controller.launch { if (state.parent == null) controller.refresh(older = true) else controller.olderReplies() } }) { Text("Load earlier messages") } }
                             state.parent?.let { parent -> item(key = "parent-${parent.id}") { MessageRow(parent, state, controller, false) } }
@@ -135,6 +144,16 @@ import kotlinx.serialization.json.*
         }
     } }
     when (dialog) {
+        "notifications" -> RoomsDialog("Notifications", { dialog = null }) {
+            Text("In-app alerts while Rooms is open. Message previews stay private.")
+            val mode = state.inbox.firstOrNull { it.room_id == state.room?.id }?.mode ?: "mentions"
+            listOf("mentions" to "Direct messages and mentions", "all" to "All messages", "mute" to "Mute this conversation").forEach { (value, label) ->
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    RadioButton(mode == value, onClick = { controller.launch { controller.notificationMode(value) } })
+                    Text(label)
+                }
+            }
+        }
         "actions" -> RoomsDialog("Conversation actions", { dialog = null }) {
             TextButton(onClick = { dialog = "details" }) { Text("Details") }
             TextButton(onClick = { query = ""; results = emptyList(); dialog = "search" }) { Text("Search") }
@@ -202,6 +221,8 @@ import kotlinx.serialization.json.*
     }
 }
 
+private fun unreadLabel(state: RoomsState, room: Room): String = state.inbox.firstOrNull { it.room_id == room.id }?.unread?.takeIf { it > 0 }?.let { " ($it)" }.orEmpty()
+
 @Composable private fun Navigation(controller: RoomsController, state: RoomsState, openDialog: (String) -> Unit, modifier: Modifier, afterOpen: () -> Unit = {}) {
     Column(modifier.background(MaterialTheme.colors.surface).padding(12.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("Rooms", style = MaterialTheme.typography.h5)
@@ -209,25 +230,40 @@ import kotlinx.serialization.json.*
         TextButton(onClick = { afterOpen(); controller.launch { controller.personal() } }, enabled = state.org != null, modifier = Modifier.fillMaxWidth()) { Text("✦ My assistant", fontWeight = if (state.room?.kind == "assistant") FontWeight.Bold else FontWeight.Normal) }
         Divider()
         Row(verticalAlignment = Alignment.CenterVertically) { Text("Rooms", Modifier.weight(1f)); TextButton(onClick = { openDialog("room") }, enabled = state.org != null) { Text("＋") } }
-        state.rooms.filter { it.kind == "room" }.forEach { room -> TextButton(onClick = { afterOpen(); controller.launch { controller.open(room) } }) { Text((if (state.user in room.members) "# " else "Join # ") + room.name, maxLines = 2) } }
+        state.rooms.filter { it.kind == "room" }.forEach { room -> TextButton(onClick = { afterOpen(); controller.launch { controller.open(room) } }) { Text((if (state.user in room.members) "# " else "Join # ") + room.name + unreadLabel(state, room), maxLines = 2) } }
         Divider()
         Row(verticalAlignment = Alignment.CenterVertically) { Text("Messages", Modifier.weight(1f)); TextButton(onClick = { openDialog("chat") }, enabled = state.org != null) { Text("＋") } }
-        state.rooms.filter { it.kind == "direct" }.forEach { room -> TextButton(onClick = { afterOpen(); controller.launch { controller.open(room) } }) { Text(room.name, maxLines = 2) } }
+        state.rooms.filter { it.kind == "direct" }.forEach { room -> TextButton(onClick = { afterOpen(); controller.launch { controller.open(room) } }) { Text(room.name + unreadLabel(state, room), maxLines = 2) } }
     }
 }
 
 @Composable private fun Composer(controller: RoomsController, state: RoomsState, short: Boolean) {
     val key = state.parent?.id ?: state.room!!.id
+    var mentions by remember(key, state.pending) { mutableStateOf<List<String>>(emptyList()) }
+    var pickingMention by remember(key) { mutableStateOf(false) }
     var draft by remember(key, state.pending) { mutableStateOf(controller.drafts[key].orEmpty()) }
+    LaunchedEffect(key) { draft = controller.restoreDraft(key) }
     Column(Modifier.fillMaxWidth().padding(if (short) 4.dp else 12.dp)) {
-        OutlinedTextField(draft, { if (it.length <= 16000) { draft = it; controller.drafts[key] = it } }, label = { Text(if (state.room?.kind == "assistant") "Ask your assistant…" else "Message, or mention @Agent…") }, modifier = Modifier.fillMaxWidth().heightIn(min = if (short) 48.dp else 70.dp, max = if (short) 68.dp else 140.dp).onPreviewKeyEvent { event ->
+        OutlinedTextField(draft, { if (it.length <= 16000) { draft = it; controller.updateDraft(key, it) } }, label = { Text(if (state.room?.kind == "assistant") "Ask your assistant…" else "Message, or mention @Agent…") }, modifier = Modifier.fillMaxWidth().heightIn(min = if (short) 48.dp else 70.dp, max = if (short) 68.dp else 140.dp).onPreviewKeyEvent { event ->
             if (event.type == KeyEventType.KeyDown && event.key == Key.Enter && !event.isShiftPressed && state.status == null && state.pending == null && draft.isNotBlank()) {
-                controller.launch { controller.send(draft) }; true
+                controller.launch { controller.send(draft, mentions) }; true
             } else false
         })
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text(if (state.room?.kind == "assistant") "Private · uses your configured AI provider" else "Shared with conversation members", Modifier.weight(1f), style = MaterialTheme.typography.caption)
-            Button(onClick = { controller.launch { controller.send(draft) } }, enabled = draft.isNotBlank() && state.pending == null && state.status == null) { Text("Send") }
+            if (state.room?.kind != "assistant") Box {
+                TextButton(onClick = { pickingMention = true }) { Text("@") }
+                DropdownMenu(pickingMention, onDismissRequest = { pickingMention = false }) {
+                    state.people.filter { it.id in state.room!!.members && it.id != state.user }.forEach { person ->
+                        DropdownMenuItem(onClick = {
+                            val next = draft + " @${person.name} "
+                            if (next.length <= 16000) { draft = next; controller.updateDraft(key, next); mentions = (mentions + person.id).distinct() }
+                            pickingMention = false
+                        }) { Text(person.name) }
+                    }
+                }
+            }
+            Button(onClick = { controller.launch { controller.send(draft, mentions) } }, enabled = draft.isNotBlank() && state.pending == null && state.status == null) { Text("Send") }
         }
     }
 }

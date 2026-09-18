@@ -53,6 +53,18 @@ export async function startLocalServer({ directory, port = 0 } = {}) {
     const saved = (await db.query('select hash from public.local_rooms_schema')).rows[0].hash;
     if (saved !== schemaHash) { await db.close(); throw new Error('The Rooms schema changed. Use a new local data directory or an explicit migration; existing messages were not changed.'); }
   }
+  // Additive migrations preserve the existing fixture and conversation history.
+  await db.exec('create table if not exists public.local_rooms_migrations(name text primary key, hash text not null)');
+  for (const name of ['002_delivery.sql']) {
+    const sql = await readFile(new URL('./'+name, import.meta.url), 'utf8');
+    const hash = createHash('sha256').update(sql).digest('hex');
+    const saved = (await db.query('select hash from public.local_rooms_migrations where name=$1',[name])).rows[0];
+    if (saved && saved.hash !== hash) throw new Error('Applied migration changed: '+name);
+    if (!saved) await db.transaction(async tx => {
+      await tx.exec(sql.replace(/^begin;$/m,'').replace(/^commit;$/m,''));
+      await tx.query('insert into public.local_rooms_migrations values($1,$2)',[name,hash]);
+    });
+  }
   // A second fictional organization makes the switcher testable without real accounts.
   const secondOrg = '10000000-0000-0000-0000-000000000002';
   await db.query('insert into public.organisations values($1,$2) on conflict(id) do nothing', [secondOrg, 'Northstar Lab (local test)']);

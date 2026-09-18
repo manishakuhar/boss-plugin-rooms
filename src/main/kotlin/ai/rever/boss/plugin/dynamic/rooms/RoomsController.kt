@@ -7,8 +7,9 @@ import kotlinx.serialization.json.*
 import java.util.UUID
 
 data class Approval(val action: ProposedAction, val answer: CompletableDeferred<Boolean>)
-data class PendingMessage(val org: String, val room: Room, val parent: String?, val body: String, val requestId: String = UUID.randomUUID().toString(), val assistant: Boolean = false, val askAgent: Boolean = false)
+data class PendingMessage(val org: String, val room: Room, val parent: String?, val body: String, val requestId: String = UUID.randomUUID().toString(), val assistant: Boolean = false, val askAgent: Boolean = false, val mentions: List<String> = emptyList())
 data class RoomsState(
+    val inbox: List<InboxEntry> = emptyList(), val delivery: String? = null,
     val organizations: List<Organization> = emptyList(), val org: String? = null,
     val conversationVisit: Long = 0,
     val rooms: List<Room> = emptyList(), val people: List<Person> = emptyList(), val room: Room? = null,
@@ -28,6 +29,45 @@ class RoomsController(val context: PluginContext, val scope: CoroutineScope) {
     private val navigation = mutableMapOf<String, String>()
     private suspend fun remembered(key: String): String? = navigation[key] ?: navigationStorage?.getString(key, "")?.takeIf { it.isNotBlank() }
     private suspend fun remember(key: String, value: String) { navigation[key] = value; navigationStorage?.putString(key, value) }
+    private val announced = mutableSetOf<String>()
+    private val toastIds = mutableListOf<String>()
+    private val readPositions = mutableMapOf<String, Long>()
+    private var viewingLatest = false
+    fun viewing(latest: Boolean) { viewingLatest = latest }
+    suspend fun refreshInbox() {
+        val snapshot = state.value; val org = snapshot.org ?: return; val epoch = generation
+        val inbox = repository.inbox(org); current(epoch)
+        update { it.copy(inbox = inbox) }
+        for (entry in inbox) for (message in entry.events) {
+            if (viewingLatest && snapshot.room?.id == message.room_id && snapshot.parent?.id == message.parent_id) continue
+            if (!announced.add(message.id)) continue
+            val toast = context.notificationProvider?.showToast("New message in Rooms", NotificationType.INFO, NotificationDuration.LONG, "Rooms", "Open") {
+                if (state.value.user == snapshot.user && state.value.org == org) launch {
+                    val rooms = repository.rooms(org)
+                    val room = rooms.firstOrNull { it.id == message.room_id && snapshot.user in it.members } ?: return@launch
+                    context.splitViewOperations?.openPanelAsTab(RoomsPanelInfo.id)
+                    open(room)
+                    if (message.parent_id != null) thread(repository.message(org, room.id, message.parent_id))
+                    else thread(repository.message(org, room.id, message.id))
+                }
+            }
+            if (toast != null) toastIds.add(toast)
+        }
+    }
+    suspend fun markVisibleRead(seq: Long) {
+        val snapshot = state.value; val org = snapshot.org ?: return; val room = snapshot.room ?: return
+        val key = "${snapshot.user}.$org.${room.id}.${snapshot.parent?.id}"
+        if (!viewingLatest || seq <= (readPositions[key] ?: 0)) return
+        val epoch = generation
+        repository.markRead(org, room.id, snapshot.parent?.id, seq); current(epoch)
+        readPositions[key] = seq
+        refreshInbox()
+    }
+    suspend fun notificationMode(mode: String) {
+        val snapshot = state.value
+        repository.notificationMode(snapshot.org ?: return, snapshot.room?.id ?: return, mode)
+        refreshInbox()
+    }
     private var generation = 0L
     private var agentJob: Job? = null
     private var activeRun: String? = null
@@ -46,7 +86,7 @@ class RoomsController(val context: PluginContext, val scope: CoroutineScope) {
     init {
         scope.launch {
             context.authDataProvider?.currentUser?.map { it?.id }?.distinctUntilChanged()?.collect { user ->
-                generation++; agentJob?.cancel(); mutable.value.approval?.answer?.complete(false); drafts.clear()
+                generation++; agentJob?.cancel(); mutable.value.approval?.answer?.complete(false); drafts.clear(); toastIds.forEach { context.notificationProvider?.dismiss(it) }; toastIds.clear(); announced.clear(); readPositions.clear(); viewingLatest = false
                 mutable.value = RoomsState(user = user)
                 if (user != null) loadOrganizations()
             }
@@ -57,7 +97,7 @@ class RoomsController(val context: PluginContext, val scope: CoroutineScope) {
                 if (state.value.room != null) {
                     val epoch = generation
                     val visit = state.value.conversationVisit
-                    try { refresh() } catch (e: CancellationException) { throw e } catch (e: Exception) {
+                    try { refresh(); refreshInbox() } catch (e: CancellationException) { throw e } catch (e: Exception) {
                         if (epoch != generation || visit != state.value.conversationVisit) continue
                         agentJob?.cancel(); update { it.copy(messages = emptyList(), replies = emptyList(), parent = null, error = "Connection or access changed. Reload to continue.") }
                     }
@@ -73,7 +113,7 @@ class RoomsController(val context: PluginContext, val scope: CoroutineScope) {
             val previous = state.value.org
             update { it.copy(organizations = orgs) }
             if (previous != null && orgs.none { it.id == previous }) {
-                generation++; stopAgent(); drafts.clear()
+                generation++; stopAgent(); drafts.clear(); toastIds.forEach { context.notificationProvider?.dismiss(it) }; toastIds.clear(); announced.clear(); readPositions.clear(); viewingLatest = false
                 mutable.value = RoomsState(user = state.value.user, organizations = orgs, error = "You no longer have access to that organization. Choose another organization.")
                 return
             }
@@ -136,28 +176,40 @@ class RoomsController(val context: PluginContext, val scope: CoroutineScope) {
         val older = repository.messages(org, parent.room_id, parent.id, snapshot.replies.minOfOrNull { it.seq }); current(epoch)
         if (state.value.parent?.id == parent.id) update { it.copy(replies = (older + it.replies).distinctBy { m -> m.id }.sortedBy { m -> m.seq }) }
     }
+    private val draftJobs = mutableMapOf<String, Job>()
+    private fun storedDraftKey(key: String) = "draft.${state.value.user}.${state.value.org}.$key"
+    suspend fun restoreDraft(key: String): String {
+        val epoch = generation; val value = drafts[key] ?: remembered(storedDraftKey(key)).orEmpty(); current(epoch)
+        return drafts.getOrPut(key) { value }
+    }
+    fun updateDraft(key: String, value: String) {
+        drafts[key] = value
+        val storedKey = storedDraftKey(key)
+        draftJobs.remove(storedKey)?.cancel()
+        draftJobs[storedKey] = launch { remember(storedKey, value) }
+    }
     fun draftKey() = state.value.parent?.id ?: state.value.room?.id.orEmpty()
-    suspend fun send(body: String) {
+    suspend fun send(body: String, mentions: List<String> = emptyList()) {
         val snapshot = state.value; val room = snapshot.room ?: return; val org = snapshot.org ?: return
         check(body.isNotBlank() && body.length <= 16000) { "Write a message of up to 16,000 characters." }
         check(snapshot.status == null) { "Wait for your assistant or stop its current reply first." }
         check(snapshot.pending == null && !sending) { "Retry the pending message before sending another." }
         val ask = room.kind == "assistant" || Regex("(^|\\s)@agent\\b", RegexOption.IGNORE_CASE).containsMatchIn(body)
         check(!ask || agentJob?.isActive != true) { "Wait for your assistant or stop its current reply first." }
-        update { it.copy(pending = PendingMessage(org, room, snapshot.parent?.id, body.trim(), askAgent = ask)) }
+        update { it.copy(pending = PendingMessage(org, room, snapshot.parent?.id, body.trim(), askAgent = ask, mentions = mentions.filter { id -> snapshot.people.any { it.id == id && body.contains("@${it.name}") } })) }
         retry()
     }
     suspend fun retry() {
         val pending = state.value.pending ?: return
         if (sending) return
-        sending = true; val epoch = generation
+        sending = true; update { it.copy(delivery = "Sending…") }; val epoch = generation
         var posted: Message? = null
         try {
-            val message = repository.post(pending.org, pending.room.id, pending.body, pending.requestId, pending.parent, pending.assistant)
-            current(epoch); update { it.copy(pending = null, error = null) }; drafts.remove(pending.parent ?: pending.room.id)
+            val message = repository.post(pending.org, pending.room.id, pending.body, pending.requestId, pending.parent, pending.assistant, pending.mentions)
+            current(epoch); update { it.copy(pending = null, error = null, delivery = "Sent") }; drafts.remove(pending.parent ?: pending.room.id); remember(storedDraftKey(pending.parent ?: pending.room.id), "")
             if (state.value.room?.id == pending.room.id) refresh()
             posted = message
-        } finally { sending = false }
+        } catch (e: Exception) { if (epoch == generation) update { it.copy(delivery = "Not sent. Retry when connected.") }; throw e } finally { sending = false }
         if (pending.askAgent) posted?.let { startAgent(pending, it) }
     }
     private fun startAgent(pending: PendingMessage, message: Message) {
@@ -206,5 +258,5 @@ class RoomsController(val context: PluginContext, val scope: CoroutineScope) {
     fun setTools(tools: Set<String>) { update { it.copy(selectedTools = tools) } }
     suspend fun loadMemory() { val org = state.value.org ?: return; val epoch = generation; val memory = repository.memory(org); current(epoch); update { it.copy(memory = memory) } }
     suspend fun saveMemory(body: String) { val org = state.value.org ?: return; val epoch = generation; val memory = repository.saveMemory(org, state.value.memory, body); current(epoch); update { it.copy(memory = memory) } }
-    fun dispose() { stopAgent(); scope.cancel(); drafts.clear() }
+    fun dispose() { toastIds.forEach { context.notificationProvider?.dismiss(it) }; stopAgent(); scope.cancel(); drafts.clear() }
 }
