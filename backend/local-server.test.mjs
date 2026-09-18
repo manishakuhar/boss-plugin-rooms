@@ -18,6 +18,31 @@ try{
  assert.equal((await call('leo','messages',{room_id:room})).status,403);
  const replies=await Promise.all(Array.from({length:6},(_,i)=>call(i%2?'maya':'manisha','post',{room_id:room,body:'Concurrent '+i,request_id:crypto.randomUUID()})));
  replies.forEach((reply,i)=>assert.equal(reply.data.author_id,i%2?b.id:a.id));
+ // Unread watermarks are per user and thread; notifications respect preferences.
+ const inbox = () => call('maya','inbox');
+ let summary=(await inbox()).data.find(x=>x.room_id===room);
+ assert.equal(summary.unread,4);assert.equal(summary.events.length,0);
+ await call('maya','notification_preference',{room_id:room,mode:'all'});
+ summary=(await inbox()).data.find(x=>x.room_id===room);assert.equal(summary.events.length,4);
+ const latest=summary.events.at(-1);
+ assert.equal((await call('maya','mark_read',{room_id:room,seq:latest.seq})).status,200);
+ assert.equal((await inbox()).data.find(x=>x.room_id===room).unread,0);
+ await call('maya','mark_read',{room_id:room,seq:posts[0].data.seq});
+ assert.equal((await inbox()).data.find(x=>x.room_id===room).unread,0);
+ const mentionRequest=crypto.randomUUID();
+ const mention=(await call('manisha','post',{room_id:room,body:'@Maya please review',mentions:[b.id],request_id:mentionRequest})).data;
+ await call('maya','notification_preference',{room_id:room,mode:'mentions'});
+ assert.equal((await inbox()).data.find(x=>x.room_id===room).events[0].id,mention.id);
+ assert.equal((await call('manisha','post',{room_id:room,body:'@Maya please review',mentions:[],request_id:mentionRequest})).status,400);
+ const threaded=(await call('manisha','post',{room_id:room,parent_id:mention.id,body:'Thread update',request_id:crypto.randomUUID()})).data;
+ await call('maya','mark_read',{room_id:room,seq:mention.seq});
+ assert.equal((await inbox()).data.find(x=>x.room_id===room).unread,1);
+ assert.equal((await call('maya','mark_read',{room_id:room,seq:threaded.seq})).status,400);
+ await call('maya','mark_read',{room_id:room,parent_id:mention.id,seq:threaded.seq});
+ assert.equal((await inbox()).data.find(x=>x.room_id===room).unread,0);
+ assert.equal((await call('leo','inbox')).data.some(x=>x.room_id===room),false);
+ assert.equal((await call('leo','mark_read',{room_id:room,seq:mention.seq})).status,403);
+ await call('maya','notification_preference',{room_id:room,mode:'mute'});
  const personal=(await call('manisha','create',{kind:'assistant',name:'My assistant',members:[]})).data;
  assert.equal((await call('maya','messages',{room_id:personal.id,actor:a.id})).status,403);
  assert.equal((await call('manisha','save_memory',{body:'Local private background',revision:0})).status,200);
@@ -25,7 +50,9 @@ try{
  const rejected=await fetch(running.url+'/rpc/boss_rooms_v1',{method:'POST',headers:{'Content-Type':'application/json',Origin:'https://example.com',Authorization:'Bearer '+a.token},body:'{}'});assert.equal(rejected.status,403);
  const unauth=await fetch(running.url+'/rpc/boss_rooms_v1',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});assert.equal(unauth.status,401);
  await running.close();running=await startLocalServer({directory});
- const restored=await call('maya','messages',{room_id:room});assert.equal(restored.status,200);assert.equal(restored.data.length,7);
+ const restored=await call('maya','messages',{room_id:room});assert.equal(restored.status,200);assert.equal(restored.data.length,8);
  assert.equal((await call('manisha','memory')).data.body,'Local private background');
+ assert.equal((await inbox()).data.find(x=>x.room_id===room).unread,0);
+ assert.equal((await inbox()).data.find(x=>x.room_id===room).mode,'mute');
  console.log('PASS: two HTTP clients, durable restart, concurrent actor isolation, duplicate retries, nonmember/private-memory denial, token/origin checks.');
 }finally{await running?.close();await rm(directory,{recursive:true,force:true});}

@@ -44,3 +44,7 @@ These are implementation/verification tasks, not requests for maintainers to wri
 Still outstanding: official store registration/signing, actual-backend staging evidence, lifecycle/external-tool validation and the maintainer decisions above. These remain draft release gates; no production migration or store deployment has been performed.
 
 Related proposals: [plugin PR #1](https://github.com/manishakuhar/boss-plugin-rooms/pull/1) and [BOSS PR #972](https://github.com/risa-labs-inc/BossConsole/pull/972).
+
+## Messaging extension
+
+Review additive `backend/002_delivery.sql` with the Rooms schema. It adds reads, notification preferences and mention recipients. The current SDK permits in-app alerts only. Closed-app/OS delivery requires an approved server event transport and host notification integration, including click routing, sound preferences and cross-device deduplication. See [messaging scope](MESSAGING-DELIVERY.md). These requests are proposals, not deployed infrastructure.

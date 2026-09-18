@@ -34,6 +34,8 @@ class RoomsScreenTest {
                 val args = json.parseToJsonElement(parameters).jsonObject
                 val payload = args["payload"]!!.jsonObject
                 return Result.success(when (args["operation"]!!.jsonPrimitive.content) {
+                    "inbox" -> "[]"
+                    "mark_read" -> "{}"
                     "organizations" -> json.encodeToString(listOf(Organization("org", "Test organization")))
                     "directory" -> json.encodeToString(listOf(Person("me", "Me")))
                     "list" -> json.encodeToString(listOf(room))

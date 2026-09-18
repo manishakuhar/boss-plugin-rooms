@@ -17,6 +17,8 @@ internal fun ids(values: List<String>) = JsonArray(values.map(::s))
 @Serializable data class Memory(val body: String = "", val revision: Int = 0)
 @Serializable data class Message(val id: String, val seq: Long, val room_id: String, val parent_id: String? = null, val author_id: String, val author_kind: String = "human", val body: String, val revision: Int = 1, val deleted: Boolean = false, val pinned: Boolean = false, val created_at: String = "")
 
+@Serializable data class InboxEntry(val room_id: String, val unread: Int = 0, val mode: String = "mentions", val events: List<Message> = emptyList())
+
 interface RoomsTransport { suspend fun call(operation: String, payload: JsonObject): JsonElement }
 
 class HostRoomsTransport(private val database: SupabaseDataProvider?, private val auth: AuthDataProvider?) : RoomsTransport {
@@ -36,6 +38,9 @@ class HostRoomsTransport(private val database: SupabaseDataProvider?, private va
 class RoomsRepository(private val transport: RoomsTransport) {
     suspend fun raw(operation: String, org: String, vararg fields: Pair<String, JsonElement>): JsonElement =
         transport.call(operation, obj("org_id" to s(org), *fields))
+    suspend fun inbox(org: String): List<InboxEntry> = json.decodeFromJsonElement(raw("inbox", org))
+    suspend fun markRead(org: String, room: String, parent: String?, seq: Long) { raw("mark_read", org, "room_id" to s(room), "parent_id" to (parent?.let(::s) ?: JsonNull), "seq" to JsonPrimitive(seq)) }
+    suspend fun notificationMode(org: String, room: String, mode: String) { raw("notification_preference", org, "room_id" to s(room), "mode" to s(mode)) }
     suspend fun organizations(): List<Organization> = json.decodeFromJsonElement(transport.call("organizations", obj()))
     suspend fun directory(org: String): List<Person> = json.decodeFromJsonElement(raw("directory", org))
     suspend fun rooms(org: String): List<Room> = json.decodeFromJsonElement(raw("list", org))
@@ -48,8 +53,8 @@ class RoomsRepository(private val transport: RoomsTransport) {
         before?.let { fields.add("before" to JsonPrimitive(it)) }
         return json.decodeFromJsonElement(raw("messages", org, *fields.toTypedArray()))
     }
-    suspend fun post(org: String, room: String, body: String, request: String, parent: String? = null, assistant: Boolean = false): Message =
-        json.decodeFromJsonElement(raw("post", org, "room_id" to s(room), "body" to s(body), "request_id" to s(request), "parent_id" to (parent?.let(::s) ?: JsonNull), "author_kind" to s(if (assistant) "assistant" else "human")))
+    suspend fun post(org: String, room: String, body: String, request: String, parent: String? = null, assistant: Boolean = false, mentions: List<String> = emptyList()): Message =
+        json.decodeFromJsonElement(raw("post", org, "room_id" to s(room), "body" to s(body), "mentions" to ids(mentions), "request_id" to s(request), "parent_id" to (parent?.let(::s) ?: JsonNull), "author_kind" to s(if (assistant) "assistant" else "human")))
     suspend fun search(org: String, room: String, query: String): List<Message> = json.decodeFromJsonElement(raw("search", org, "room_id" to s(room), "query" to s(query)))
     suspend fun pins(org: String, room: String): List<Message> = json.decodeFromJsonElement(raw("pins", org, "room_id" to s(room)))
     suspend fun pin(org: String, message: Message, pinned: Boolean): Message = json.decodeFromJsonElement(raw("pin", org, "room_id" to s(message.room_id), "message_id" to s(message.id), "revision" to JsonPrimitive(message.revision), "pinned" to JsonPrimitive(pinned)))
