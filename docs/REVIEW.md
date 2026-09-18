@@ -42,3 +42,7 @@ Local validation before submission: 35 Kotlin tests, SQL permission tests, two-c
 - Obtain maintainer agreement on repository/store ownership and the fixed navigation entry.
 
 These are draft review gates. No production deployment or store release is included in this contribution.
+
+## Maintainer handoff
+
+[Maintainer requirements](MAINTAINER-REQUIREMENTS.md) records requested platform decisions/access separately from verification work owned by this contribution.
