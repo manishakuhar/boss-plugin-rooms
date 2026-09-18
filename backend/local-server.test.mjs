@@ -1,0 +1,31 @@
+import {startLocalServer,demoOrg} from './local-server.mjs';
+import {mkdtemp,rm} from 'node:fs/promises';import {tmpdir} from 'node:os';import {join} from 'node:path';import assert from 'node:assert/strict';
+const directory=await mkdtemp(join(tmpdir(),'boss-rooms-'));
+let running;
+try{
+ running=await startLocalServer({directory});
+ await assert.rejects(startLocalServer({directory}), /already open/);
+ const call=async(key,operation,payload={})=>{
+  const user=running.users.find(u=>u.key===key);
+  const response=await fetch(running.url+'/rpc/boss_rooms_v1',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+user.token},body:JSON.stringify({operation,payload:{org_id:demoOrg,...payload}})});
+  return {status:response.status,data:await response.json()};
+ };
+ const a=running.users[0],b=running.users[1];
+ const created=await call('manisha','create',{kind:'room',name:'Real local conversation',members:[b.id]});assert.equal(created.status,200);const room=created.data.id;
+ const request=crypto.randomUUID();const posts=await Promise.all(Array.from({length:8},()=>call('manisha','post',{room_id:room,body:'Hello Maya',request_id:request})));
+ assert(posts.every(p=>p.status===200));assert.equal(new Set(posts.map(p=>p.data.id)).size,1);
+ assert.equal((await call('maya','messages',{room_id:room})).data[0].body,'Hello Maya');
+ assert.equal((await call('leo','messages',{room_id:room})).status,403);
+ const replies=await Promise.all(Array.from({length:6},(_,i)=>call(i%2?'maya':'manisha','post',{room_id:room,body:'Concurrent '+i,request_id:crypto.randomUUID()})));
+ replies.forEach((reply,i)=>assert.equal(reply.data.author_id,i%2?b.id:a.id));
+ const personal=(await call('manisha','create',{kind:'assistant',name:'My assistant',members:[]})).data;
+ assert.equal((await call('maya','messages',{room_id:personal.id,actor:a.id})).status,403);
+ assert.equal((await call('manisha','save_memory',{body:'Local private background',revision:0})).status,200);
+ assert.equal((await call('maya','memory')).data.body,'');
+ const rejected=await fetch(running.url+'/rpc/boss_rooms_v1',{method:'POST',headers:{'Content-Type':'application/json',Origin:'https://example.com',Authorization:'Bearer '+a.token},body:'{}'});assert.equal(rejected.status,403);
+ const unauth=await fetch(running.url+'/rpc/boss_rooms_v1',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});assert.equal(unauth.status,401);
+ await running.close();running=await startLocalServer({directory});
+ const restored=await call('maya','messages',{room_id:room});assert.equal(restored.status,200);assert.equal(restored.data.length,7);
+ assert.equal((await call('manisha','memory')).data.body,'Local private background');
+ console.log('PASS: two HTTP clients, durable restart, concurrent actor isolation, duplicate retries, nonmember/private-memory denial, token/origin checks.');
+}finally{await running?.close();await rm(directory,{recursive:true,force:true});}
