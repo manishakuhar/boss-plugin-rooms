@@ -1,0 +1,8 @@
+.gradle/
+build/
+node_modules/
+.DS_Store
+.local-rooms/
+
+.env
+.env.*

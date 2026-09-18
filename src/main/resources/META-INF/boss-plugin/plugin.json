@@ -1,0 +1,20 @@
+{
+  "manifestVersion": 1,
+  "pluginId": "ai.rever.boss.plugin.dynamic.rooms",
+  "displayName": "Rooms",
+  "version": "0.1.0",
+  "apiVersion": "1.0.93",
+  "minApiVersion": "1.0.93",
+  "mainClass": "ai.rever.boss.plugin.dynamic.rooms.RoomsPlugin",
+  "type": "panel",
+  "description": "Team conversations with a tool-using assistant, powered by the BOSS AI Gateway.",
+  "author": "Manisha Kuhar",
+  "minBossVersion": "9.5.20",
+  "dependencies": [
+    {
+      "pluginId": "ai.rever.boss.plugin.dynamic.aigateway",
+      "version": ">=1.1.7",
+      "optional": true
+    }
+  ]
+}
